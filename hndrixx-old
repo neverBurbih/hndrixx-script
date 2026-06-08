@@ -7581,118 +7581,92 @@ local function launchMainScript()
 						end
 					end)
 					-- ================================================================
-					-- ── NoClip (HaloHub/Valary logic + full bypass) ────────────
-					-- Step 1: Snapshot CanCollide=true parts dari karakter saat spawn
-					local Player_Collide_Data = {}
-					local function buildCollideData(char)
-						Player_Collide_Data = {}
-						for _, v in ipairs(char:GetChildren()) do
+					-- ── NoClip — logic HNDRIXX ─────────────────────────────────
+					-- Cache GetChildren (direct parts), bypass getrawmetatable
+					local NC_CollideData = {}
+					local function NC_CacheCollide(char)
+						NC_CollideData = {}
+						for _, part in ipairs(char:GetChildren()) do
 							pcall(function()
-								if v.CanCollide == true then
-									Player_Collide_Data[v.Name] = true
+								if part:IsA("BasePart") and part.CanCollide ~= nil then
+									NC_CollideData[part.Name] = part.CanCollide
 								end
 							end)
 						end
 					end
-					if plr.Character then pcall(function() buildCollideData(plr.Character) end) end
+					if plr.Character then pcall(function() NC_CacheCollide(plr.Character) end) end
 					plr.CharacterAdded:Connect(function(char)
-						task.wait(0.5)
-						pcall(function() buildCollideData(char) end)
+						NC_CacheCollide(char)
 					end)
 
-					-- Step 2: BYPASS LAYER 1 — getrawmetatable
-					local _rawMetaInstalled = false
-					local function installRawMetaBypass()
-						if _rawMetaInstalled then return end
+					-- Metatable bypass (HNDRIXX style)
+					local _ncMetaInstalled = false
+					local function NC_InstallMeta()
+						if _ncMetaInstalled then return end
+						_ncMetaInstalled = true
 						pcall(function()
-							local game_metatable = getrawmetatable(game)
-							setreadonly(game_metatable, false)
-							local __index_orig = game_metatable.__index
-							game_metatable.__index = function(Self, Index)
-								if Index == "CanCollide" then
-									if typeof(Self) == "Instance" and Self.Name then
-										if Player_Collide_Data[Self.Name] then
-											return Player_Collide_Data[Self.Name]
-										end
+							local oldMeta  = getrawmetatable(game)
+							local oldIndex = oldMeta.__index
+							local oldNamecall = oldMeta.__namecall
+							setreadonly(oldMeta, false)
+							oldMeta.__index = function(self, index)
+								if index == "CanCollide" then
+									if typeof(self) == "Instance" and self.Name and NC_CollideData[self.Name] then
+										return NC_CollideData[self.Name]
 									end
 								end
-								return __index_orig(Self, Index)
+								return oldIndex(self, index)
 							end
-							setreadonly(game_metatable, true)
-							_rawMetaInstalled = true
+							oldMeta.__namecall = function(self, ...)
+								local method = getnamecallmethod()
+								return oldNamecall(self, ...)
+							end
+							setreadonly(oldMeta, true)
 						end)
 					end
 
-					-- Step 3: BYPASS LAYER 2 — hookmetamethod (fallback)
-					local _hmHook = nil
-					local function installHookMetaBypass()
-						if _hmHook then return end
-						pcall(function()
-							_hmHook = hookmetamethod(game, "__index", function(Self, Index)
-								if Index ~= "CanCollide" then
-									return _hmHook(Self, Index)
-								end
-								if checkcaller() then
-									return _hmHook(Self, Index)
-								end
-								if typeof(Self) == "Instance" and Self.Name and Player_Collide_Data[Self.Name] then
-									return Player_Collide_Data[Self.Name]
-								end
-								if not plr.Character then return _hmHook(Self, Index) end
-								local hrp = plr.Character:FindFirstChild("HumanoidRootPart")
-								if not hrp then return _hmHook(Self, Index) end
-								return _hmHook(Self, Index)
-							end)
-						end)
-					end
-					local function removeHookMetaBypass()
-						if _hmHook then
-							pcall(function() hookmetamethod(game, "__index", _hmHook) end)
-							_hmHook = nil
-						end
-					end
-
-					-- Install kedua bypass sekali di awal
-					installRawMetaBypass()
-					installHookMetaBypass()
-
-					-- Step 4: RenderStep — set char parts CanCollide=false tiap frame
 					local noclipActive = false
 					local function enableAura()
 						if noclipActive then return end
+						NC_InstallMeta()
 						noclipActive = true
 						RunService:BindToRenderStep("NoClip_Valary", 400, function()
 							if not Flags.AuraKill then return end
 							local char = plr.Character
 							if not char then return end
-							local hum = char:FindFirstChildOfClass("Humanoid")
-							if hum and hum.Health ~= 0 then
-								for _, v in ipairs(char:GetDescendants()) do
-									if Player_Collide_Data[v.Name] then
-										pcall(function() v.CanCollide = false end)
-									end
-								end
-							else
-								for _, v in ipairs(char:GetDescendants()) do
-									if Player_Collide_Data[v.Name] then
-										pcall(function() v.CanCollide = true end)
-									end
+							local hum = char:FindFirstChild("Humanoid")
+							if not hum or hum.Health <= 0 then return end
+							for _, part in ipairs(char:GetDescendants()) do
+								if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+									pcall(function() part.CanCollide = false end)
 								end
 							end
+							local root = char:FindFirstChild("HumanoidRootPart")
+							if root then pcall(function() root.CanCollide = false end) end
 						end)
 					end
 					local function disableAura()
+						if not noclipActive then return end
 						noclipActive = false
 						RunService:UnbindFromRenderStep("NoClip_Valary")
 						local char = plr.Character
 						if char then
-							for _, v in ipairs(char:GetDescendants()) do
-								if Player_Collide_Data[v.Name] then
-									pcall(function() v.CanCollide = true end)
+							for _, part in ipairs(char:GetDescendants()) do
+								if part:IsA("BasePart") and part.Name and NC_CollideData[part.Name] ~= nil then
+									pcall(function() part.CanCollide = NC_CollideData[part.Name] end)
+								elseif part:IsA("BasePart") and part.Name == "HumanoidRootPart" then
+									pcall(function() part.CanCollide = true end)
 								end
 							end
 						end
 					end
+
+					-- Reset saat respawn
+					plr.CharacterAdded:Connect(function(char)
+						if noclipActive then disableAura() end
+						task.wait(0.5)
+						NC_CacheCollide(char)
+					end)
 					task.spawn(function()
 						local last = Flags.AuraKill
 						while Running do
